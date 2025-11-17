@@ -1,0 +1,27 @@
+services:
+  bankman:
+    container_name: bankman
+    build:
+      context: ./src
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "8200:80"
+    env_file:
+      - ./.env
+    volumes:
+      - ./src:/var/www/html
+      - ./src/apache/default.conf:/etc/apache2/sites-enabled/000-default.conf
+      - ./auth.json:/root/.composer/auth.json:ro
+#  queue:
+#    container_name: bankman-queue
+#    build:
+#      context: .
+#      dockerfile: ./src/supervisor/Dockerfile
+#    restart: always
+#    env_file:
+#      - ./.env
+#    volumes:
+#      - ./src:/var/www/html
+#    depends_on:
+#      - bankman
