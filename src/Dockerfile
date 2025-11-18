@@ -28,11 +28,6 @@ RUN docker-php-ext-install zip
 RUN docker-php-ext-install bcmath
 RUN docker-php-ext-enable pdo_mysql
 
-# Install Datadog PHP APM extension
-RUN curl -LO https://github.com/DataDog/dd-trace-php/releases/latest/download/datadog-setup.php \
-    && php datadog-setup.php --php-bin=all --enable-appsec \
-    && rm datadog-setup.php
-
 WORKDIR /var/www/html
 
 RUN chown -R www-data:www-data /var/www
@@ -46,7 +41,6 @@ RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local
 
 COPY / ./
 
-# Ensure storage directories exist and set proper permissions
 RUN mkdir -p /var/www/html/storage/logs \
     && mkdir -p /var/www/html/storage/framework/cache \
     && mkdir -p /var/www/html/storage/framework/sessions \
@@ -54,23 +48,19 @@ RUN mkdir -p /var/www/html/storage/logs \
     && mkdir -p /var/www/html/storage/app \
     && mkdir -p /var/www/html/bootstrap/cache
 
-# Set proper ownership and permissions for Laravel directories
 RUN chown -R www-data:www-data /var/www/html/storage \
     && chown -R www-data:www-data /var/www/html/bootstrap/cache \
     && chmod -R 775 /var/www/html/storage \
     && chmod -R 775 /var/www/html/bootstrap/cache
 
-# Ensure the Laravel log file can be created and written to
 RUN touch /var/www/html/storage/logs/laravel.log \
     && chown www-data:www-data /var/www/html/storage/logs/laravel.log \
     && chmod 664 /var/www/html/storage/logs/laravel.log
 
 
-# Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
 RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
-# Clean up auth file for security
 
 RUN service apache2 stop
 

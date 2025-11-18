@@ -32,9 +32,9 @@ class TransactionController extends Controller
             ->with(
                 [
                 'sourceAccount:id,account_number,account_name,client_id',
-                'sourceAccount.client:id,external_id,email,phone',
+                'sourceAccount.client:id,external_id,email',
                 'destinationAccount:id,account_number,account_name,client_id',
-                'destinationAccount.client:id,external_id,email,phone'
+                'destinationAccount.client:id,external_id,email'
                 ]
             );
 
@@ -399,8 +399,18 @@ class TransactionController extends Controller
 
             DB::commit();
 
+            Log::info('Broadcasting transfer events', [
+                'transaction_id' => $transaction->id,
+                'source_account_id' => $sourceAccount->id,
+                'destination_account_id' => $destinationAccount->id,
+                'source_client_id' => $sourceAccount->client->external_id,
+                'destination_client_id' => $destinationAccount->client->external_id,
+            ]);
+
             event(new \App\Events\TransactionProcessed($sourceAccount, $transaction, 'debit'));
             event(new \App\Events\TransactionProcessed($destinationAccount, $transaction, 'credit'));
+
+            Log::info('Transfer events broadcasted');
 
             $commission = $transaction->metadata['commission_amount'] ?? 0;
 
@@ -985,9 +995,9 @@ class TransactionController extends Controller
             ->with(
                 [
                 'sourceAccount:id,account_number,account_name,client_id',
-                'sourceAccount.client:id,external_id,email,phone',
+                'sourceAccount.client:id,external_id,email',
                 'destinationAccount:id,account_number,account_name,client_id',
-                'destinationAccount.client:id,external_id,email,phone'
+                'destinationAccount.client:id,external_id,email'
                 ]
             )
             ->orderBy('created_at', 'desc')

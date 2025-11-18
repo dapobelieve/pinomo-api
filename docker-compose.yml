@@ -13,15 +13,44 @@ services:
       - ./src:/var/www/html
       - ./src/apache/default.conf:/etc/apache2/sites-enabled/000-default.conf
       - ./auth.json:/root/.composer/auth.json:ro
-#  queue:
-#    container_name: bankman-queue
-#    build:
-#      context: .
-#      dockerfile: ./src/supervisor/Dockerfile
-#    restart: always
-#    env_file:
-#      - ./.env
-#    volumes:
-#      - ./src:/var/www/html
-#    depends_on:
-#      - bankman
+    # depends_on:
+    #   mysql:
+    #     condition: service_healthy
+    # redis:
+    #   condition: service_healthy
+
+  mysql:
+    container_name: pimono-mysql
+    image: mysql:8.0
+    restart: always
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_DATABASE: pimono
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_ROOT_HOST: "%"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pSecret"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    container_name: pimono-redis
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  mysql_data:
+  redis_data:

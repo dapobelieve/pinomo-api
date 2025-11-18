@@ -726,7 +726,7 @@ class Transaction extends Model
             'source_account_id' => $this->source_account_id,
             'currency' => $this->currency,
             'amount' => $chargeAmount,
-            'description' => "Charge: {$charge->name} for transaction {$this->internal_reference}",
+            'description' => "Charge: {$this->internal_reference}",
             'metadata' => [
                 'charge_id' => $charge->id,
                 'original_transaction_id' => $this->id,
