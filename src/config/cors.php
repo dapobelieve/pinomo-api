@@ -1,10 +1,9 @@
 <?php
 
 return [
-    'paths' => ['api/*', 'sanctum/csrf-cookie'],
+    'paths' => ['api/*', 'sanctum/csrf-cookie', 'broadcasting/auth'],
     'allowed_methods' => ['*'],
     'allowed_origins' => ['*'],
-//    'allowed_origins' => ['https://bankman-core-portal.lovable.app', ' https://preview--bankman-core-portal.lovable.app'],
     'allowed_origins_patterns' => [],
     'allowed_headers' => ['*'],
     'exposed_headers' => [],

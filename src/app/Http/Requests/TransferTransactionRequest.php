@@ -27,22 +27,19 @@ class TransferTransactionRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'sender_account_id' => ['required', 'uuid', 'exists:accounts,id'],
-            'receiver_id' => ['required', 'uuid', 'exists:accounts,id'],
+            'receiver_id' => ['required', 'string', 'exists:accounts,account_number'],
             'amount' => ['required', 'gt:0', 'numeric'],
             'description' => ['nullable', 'string'],
-            'date' => ['required', 'date_format:d F Y'],
-            'transaction_reference' => ['required', 'string'],
-            'session_id' => ['required', 'string'],
+            'transaction_reference' => ['required', 'string', 'unique:transactions,external_reference'],
         ];
     }
 
     public function messages(): array
     {
         return [
-            'sender_account_id.exists' => 'The sender account does not exist.',
             'receiver_id.exists' => 'The receiver account does not exist.',
             'amount.gt' => 'The amount must be greater than zero.',
+            'transaction_reference.unique' => 'This transaction reference has already been used.',
         ];
     }
 }

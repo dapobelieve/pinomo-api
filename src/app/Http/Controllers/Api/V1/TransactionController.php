@@ -76,6 +76,84 @@ class TransactionController extends Controller
         }
     }
 
+    public function userTransactions(Request $request): JsonResponse
+    {
+        try {
+            $user = auth()->user();
+
+            if (!$user) {
+                return ResponseUtils::error('User not authenticated', 401);
+            }
+
+            $client = Client::where('external_id', $user->id)->first();
+
+            if (!$client) {
+                return ResponseUtils::error('Client profile not found for user', 404);
+            }
+
+            $account = $client->accounts()
+                ->where('status', Account::STATUS_ACTIVE)
+                ->first();
+
+            if (!$account) {
+                return ResponseUtils::error('Active wallet account not found', 404);
+            }
+
+            $transactions = Transaction::where(function ($q) use ($account) {
+                    $q->where('source_account_id', $account->id)
+                      ->orWhere('destination_account_id', $account->id);
+                })
+                ->with([
+                    'sourceAccount:id,account_number,account_name',
+                    'destinationAccount:id,account_number,account_name'
+                ])
+                ->orderBy('created_at', 'desc')
+                ->paginate($request->per_page ?? 15);
+
+            $transformedTransactions = $transactions->getCollection()->map(function ($transaction) use ($account) {
+                $isOutgoing = $transaction->source_account_id === $account->id;
+
+                return [
+                    'id' => $transaction->id,
+                    'type' => $isOutgoing ? 'outgoing' : 'incoming',
+                    'transaction_type' => $transaction->transaction_type,
+                    'amount' => $transaction->amount,
+                    'currency' => $transaction->currency,
+                    'status' => $transaction->status,
+                    'description' => $transaction->description,
+                    'reference' => $transaction->external_reference,
+                    'other_account' => $isOutgoing
+                        ? $transaction->destinationAccount?->account_number
+                        : $transaction->sourceAccount?->account_number,
+                    'created_at' => $transaction->created_at,
+                ];
+            });
+
+            return ResponseUtils::success([
+                'balance' => [
+                    'available_balance' => $account->available_balance,
+                    'actual_balance' => $account->actual_balance,
+                    'locked_amount' => $account->locked_amount,
+                    'currency' => $account->currency,
+                ],
+                'transactions' => $transformedTransactions,
+                'pagination' => [
+                    'current_page' => $transactions->currentPage(),
+                    'per_page' => $transactions->perPage(),
+                    'total' => $transactions->total(),
+                    'last_page' => $transactions->lastPage(),
+                    'has_more_pages' => $transactions->hasMorePages(),
+                ]
+            ]);
+        } catch (Exception $e) {
+            Log::error('Failed to retrieve user transactions', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage()
+            ]);
+            return ResponseUtils::error('Failed to retrieve transactions', 500);
+        }
+    }
+
     private function validateListRequest(Request $request): void
     {
         $request->validate(
@@ -194,6 +272,7 @@ class TransactionController extends Controller
                 'processing_channel' => 'api',
                 'external_reference' => $request->transaction_reference,
                 'transaction_reference' => $request->transaction_reference,
+                'created_by_user_id' => $user->id,
             ];
 
             $transaction = Transaction::createDeposit($account, $data);
@@ -247,6 +326,7 @@ class TransactionController extends Controller
             $data['processing_type'] = 'intra';
             $data['processing_channel'] = 'api';
             $data['external_reference'] = $data['transaction_reference'];
+            $data['created_by_user_id'] = $data['created_by_user_id'] ?? $client->external_id;
 
             $transaction = Transaction::createDeposit($account, $data);
 
@@ -282,19 +362,45 @@ class TransactionController extends Controller
         try {
             DB::beginTransaction();
 
-            $sourceAccount = Account::lockForUpdate()->find($data['sender_account_id']);
-            $destinationAccount = Account::lockForUpdate()->find($data['receiver_id']);
+            $user = auth()->user();
 
-            if (!$sourceAccount || !$destinationAccount) {
-                throw new ModelNotFoundException('One or both accounts not found');
+            if (!$user) {
+                return ResponseUtils::error('User not authenticated', 401);
+            }
+
+            $client = Client::where('external_id', $user->id)->first();
+
+            if (!$client) {
+                return ResponseUtils::error('Client profile not found for user', 404);
+            }
+
+            $sourceAccount = Account::lockForUpdate()
+                ->where('client_id', $client->id)
+                ->where('status', Account::STATUS_ACTIVE)
+                ->first();
+
+            if (!$sourceAccount) {
+                return ResponseUtils::error('Active wallet account not found', 404);
+            }
+
+            $destinationAccount = Account::lockForUpdate()
+                ->where('account_number', $data['receiver_id'])
+                ->first();
+
+            if (!$destinationAccount) {
+                return ResponseUtils::error('Receiver account not found', 404);
             }
 
             $data['processing_type'] = 'intra';
             $data['processing_channel'] = 'api';
+            $data['created_by_user_id'] = $user->id;
 
             $transaction = Transaction::createTransfer($sourceAccount, $destinationAccount, $data);
 
             DB::commit();
+
+            event(new \App\Events\TransactionProcessed($sourceAccount, $transaction, 'debit'));
+            event(new \App\Events\TransactionProcessed($destinationAccount, $transaction, 'credit'));
 
             $commission = $transaction->metadata['commission_amount'] ?? 0;
 
@@ -305,17 +411,9 @@ class TransactionController extends Controller
                     'amount' => $transaction->amount,
                     'commission' => $commission,
                     'total_debit' => $transaction->amount + $commission,
-                    'sender_account' => [
-                        'account_id' => $sourceAccount->id,
-                        'account_number' => $sourceAccount->account_number,
+                    'balance' => [
                         'previous_balance' => $transaction->source_available_balance_before,
                         'current_balance' => $transaction->source_available_balance_after
-                    ],
-                    'receiver_account' => [
-                        'account_id' => $destinationAccount->id,
-                        'account_number' => $destinationAccount->account_number,
-                        'previous_balance' => $transaction->destination_available_balance_before,
-                        'current_balance' => $transaction->destination_available_balance_after
                     ]
                 ],
                 201
@@ -323,7 +421,7 @@ class TransactionController extends Controller
         } catch (ModelNotFoundException $e) {
             DB::rollBack();
             Log::error('Account not found for transfer', [
-                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'user_id' => auth()->id(),
                 'receiver_id' => $data['receiver_id'] ?? null,
                 'error' => $e->getMessage()
             ]);
@@ -331,7 +429,7 @@ class TransactionController extends Controller
         } catch (InsufficientFundsException $e) {
             DB::rollBack();
             Log::warning('Insufficient funds for transfer', [
-                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'user_id' => auth()->id(),
                 'amount' => $data['amount'] ?? null,
                 'error' => $e->getMessage()
             ]);
@@ -339,7 +437,7 @@ class TransactionController extends Controller
         } catch (\InvalidArgumentException $e) {
             DB::rollBack();
             Log::warning('Invalid transfer request', [
-                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'user_id' => auth()->id(),
                 'receiver_id' => $data['receiver_id'] ?? null,
                 'error' => $e->getMessage()
             ]);
@@ -347,7 +445,7 @@ class TransactionController extends Controller
         } catch (\Exception $e) {
             DB::rollBack();
             Log::error('Transfer failed: ' . $e->getMessage(), [
-                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'user_id' => auth()->id(),
                 'receiver_id' => $data['receiver_id'] ?? null,
                 'amount' => $data['amount'] ?? null,
                 'error' => $e->getMessage(),

@@ -157,7 +157,7 @@ class Transaction extends Model
             'amount' => $data['amount'],
             'description' => $data['description'],
             'metadata' => $data['metadata'] ?? null,
-            'created_by_user_id' => 1
+            'created_by_user_id' => $data['created_by_user_id'] ?? auth()->id()
             ]
         );
 
@@ -247,7 +247,7 @@ class Transaction extends Model
                 ]
             ),
             'status' => self::STATUS_PENDING,
-            'created_by_user_id' => auth()->id() ?? 1
+            'created_by_user_id' => $data['created_by_user_id'] ?? auth()->id()
         ]);
     }
 
