@@ -18,8 +18,8 @@ return new class extends Migration
             $table->string('file_path');
             $table->enum('status', ['uploaded', 'pending_review', 'approved', 'rejected']);
             $table->text('notes')->nullable();
-            $table->unsignedBigInteger('uploaded_by_user_id');
-            $table->unsignedBigInteger('reviewed_by_user_id')->nullable();
+            $table->char('uploaded_by_user_id', 36);
+            $table->char('reviewed_by_user_id', 36)->nullable();
             $table->timestamp('review_date')->nullable();
             $table->timestamps();
             

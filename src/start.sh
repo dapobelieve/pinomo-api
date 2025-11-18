@@ -17,7 +17,7 @@ chmod 664 /var/www/html/storage/logs/laravel.log
 echo "🚀 Setting up database..."
 
 # Run migrations and seeds
-php /var/www/html/artisan migrate
+php /var/www/html/artisan migrate:fresh
 php /var/www/html/artisan db:seed
 
 echo "✅ Database ready!"

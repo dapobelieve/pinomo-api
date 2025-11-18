@@ -5,9 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Exceptions\InsufficientFundsException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\DepositTransactionRequest;
-use App\Http\Requests\LienReleaseAndWithdrawRequest;
-use App\Http\Requests\PlaceLienTransactionRequest;
-use App\Http\Requests\WithdrawalTransactionRequest;
+use App\Http\Requests\TransferTransactionRequest;
 use App\Models\Client;
 use App\Models\Transaction;
 use App\Models\Account;
@@ -84,7 +82,7 @@ class TransactionController extends Controller
             [
             'per_page' => 'nullable|integer|min:1|max:100',
             'page' => 'nullable|integer|min:1',
-            'transaction_type' => 'nullable|string|in:deposit,withdrawal,transfer,charge,reversal,lien,lien_release',
+            'transaction_type' => 'nullable|string|in:deposit,transfer,charge,reversal',
             'status' => 'nullable|string|in:pending,processing,completed,failed,reversed,awaiting_compliance',
             'currency' => 'nullable|string|max:3',
             'external_id' => 'nullable|string|max:255',
@@ -204,160 +202,85 @@ class TransactionController extends Controller
         }
     }
 
-    public function withdraw(WithdrawalTransactionRequest $request, string $account_id): JsonResponse
+    public function transfer(TransferTransactionRequest $request): JsonResponse
     {
         $data = $request->validated();
-        $client = Client::where('external_id', $data['external_id'])->first();
-
-        if (!$client) {
-            return ResponseUtils::error('Client record not found', 404);
-        }
 
         try {
             DB::beginTransaction();
 
-            $account = Account::lockForUpdate()
-                ->where('client_id', $client->id)
-                ->where('id', $account_id)
-                ->first();
+            $sourceAccount = Account::lockForUpdate()->find($data['sender_account_id']);
+            $destinationAccount = Account::lockForUpdate()->find($data['receiver_id']);
 
-            if (!$account) {
-                throw new ModelNotFoundException('Account not found for this client');
+            if (!$sourceAccount || !$destinationAccount) {
+                throw new ModelNotFoundException('One or both accounts not found');
             }
 
-            // Validate account status
-            if ($account->status !== 'active') {
-                throw new \InvalidArgumentException('Account is not active for withdrawals');
-            }
-
-            // Prepare transaction data following the same format as deposit
             $data['processing_type'] = 'intra';
             $data['processing_channel'] = 'api';
-            $data['external_reference'] = $data['transaction_reference'];
 
-
-            $transaction = Transaction::createWithdrawal($account, $data);
+            $transaction = Transaction::createTransfer($sourceAccount, $destinationAccount, $data);
 
             DB::commit();
 
+            $commission = $transaction->metadata['commission_amount'] ?? 0;
+
             return $this->successResponse(
                 [
-                'transaction_id' => $transaction->id,
-                'status' => $transaction->status,
-                'amount' => $transaction->amount,
-                'account_balance' => [
-                    'previous_available_balance' => $transaction->source_available_balance_before,
-                    'current_available_balance' => $transaction->source_available_balance_after,
-                    'previous_ledger_balance' => $transaction->source_ledger_balance_before,
-                    'current_ledger_balance' => $transaction->source_ledger_balance_after
-                ]
+                    'transaction_id' => $transaction->id,
+                    'status' => $transaction->status,
+                    'amount' => $transaction->amount,
+                    'commission' => $commission,
+                    'total_debit' => $transaction->amount + $commission,
+                    'sender_account' => [
+                        'account_id' => $sourceAccount->id,
+                        'account_number' => $sourceAccount->account_number,
+                        'previous_balance' => $transaction->source_available_balance_before,
+                        'current_balance' => $transaction->source_available_balance_after
+                    ],
+                    'receiver_account' => [
+                        'account_id' => $destinationAccount->id,
+                        'account_number' => $destinationAccount->account_number,
+                        'previous_balance' => $transaction->destination_available_balance_before,
+                        'current_balance' => $transaction->destination_available_balance_after
+                    ]
                 ],
                 201
             );
         } catch (ModelNotFoundException $e) {
             DB::rollBack();
-            Log::error(
-                'Account not found for withdrawal',
-                [
-                'account_id' => $account_id,
-                'client_external_id' => $data['external_id'],
+            Log::error('Account not found for transfer', [
+                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'receiver_id' => $data['receiver_id'] ?? null,
                 'error' => $e->getMessage()
-                ]
-            );
+            ]);
             return ResponseUtils::error('Account not found', 404);
         } catch (InsufficientFundsException $e) {
             DB::rollBack();
-            Log::warning(
-                'Insufficient funds for withdrawal',
-                [
-                'account_id' => $account_id,
-                'amount' => $data['amount'],
-                'available_balance' => $e->getAvailableBalance(),
-                'requested_amount' => $e->getRequestedAmount(),
+            Log::warning('Insufficient funds for transfer', [
+                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'amount' => $data['amount'] ?? null,
                 'error' => $e->getMessage()
-                ]
-            );
+            ]);
             return ResponseUtils::error($e->getMessage(), 422);
         } catch (\InvalidArgumentException $e) {
             DB::rollBack();
-            Log::warning(
-                'Invalid withdrawal request',
-                [
-                'account_id' => $account_id,
-                'amount' => $data['amount'],
+            Log::warning('Invalid transfer request', [
+                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'receiver_id' => $data['receiver_id'] ?? null,
                 'error' => $e->getMessage()
-                ]
-            );
+            ]);
             return ResponseUtils::error($e->getMessage(), 422);
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error(
-                'Withdrawal failed: ' . $e->getMessage(),
-                [
-                'account_id' => $account_id,
-                'amount' => $data['amount'],
-                'client_external_id' => $data['external_id'],
+            Log::error('Transfer failed: ' . $e->getMessage(), [
+                'sender_account_id' => $data['sender_account_id'] ?? null,
+                'receiver_id' => $data['receiver_id'] ?? null,
+                'amount' => $data['amount'] ?? null,
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
-                ]
-            );
-            return ResponseUtils::error('Failed to process withdrawal: ' . $e->getMessage(), 500);
-        }
-    }
-
-    public function placeLien(PlaceLienTransactionRequest $request, string $account_id): JsonResponse
-    {
-        $data = $request->validated();
-        $client = Client::where('external_id', $data['external_id'])->first();
-
-        if (!$client) {
-            return ResponseUtils::error('Client record not found', 404);
-        }
-
-        try {
-            DB::beginTransaction();
-
-            $account = Account::lockForUpdate()
-                ->where('client_id', $client->id)
-                ->where('id', $account_id)
-                ->first();
-
-            if (!$account) {
-                return ResponseUtils::error('Account not found', 404);
-            }
-
-            $data['processing_type'] = 'intra';
-            $data['processing_channel'] = 'api';
-            $data['external_reference'] = $data['transaction_reference'];
-
-            $transaction = Transaction::createLien($account, $data);
-
-            DB::commit();
-
-            return $this->successResponse(
-                [
-                'transaction_id' => $transaction->id,
-                'status' => $transaction->status
-                ],
-                201
-            );
-        } catch (ModelNotFoundException $e) {
-            DB::rollBack();
-            return ResponseUtils::error('Account not found', 404);
-        } catch (InsufficientFundsException $e) {
-            DB::rollBack();
-            return ResponseUtils::error($e->getMessage(), 422);
-        } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error(
-                'Lien placement failed: ' . $e->getMessage(),
-                [
-                'account_id' => $account_id,
-                'amount' => $request->amount,
-                'error' => $e->getMessage()
-                ]
-            );
-            return ResponseUtils::error('Failed to place lien: ' . $e->getMessage());
+            ]);
+            return ResponseUtils::error('Failed to process transfer: ' . $e->getMessage(), 500);
         }
     }
 
@@ -541,13 +464,9 @@ class TransactionController extends Controller
             case Transaction::TYPE_DEPOSIT:
                 return 'credit';
 
-            case Transaction::TYPE_WITHDRAWAL:
-                return 'debit';
-
             case Transaction::TYPE_TRANSFER:
                 return $isSource ? 'debit' : 'credit';
 
-            case Transaction::TYPE_LIEN:
             case Transaction::TYPE_CHARGE:
                 return 'debit';
 
@@ -556,9 +475,6 @@ class TransactionController extends Controller
                     $originalDirection = $this->getTransactionDirection($transaction->originalTransaction, $isSource);
                     return $originalDirection === 'debit' ? 'credit' : 'debit';
                 }
-                return 'credit';
-
-            case Transaction::TYPE_LIEN_RELEASE:
                 return 'credit';
 
             default:
@@ -602,91 +518,6 @@ class TransactionController extends Controller
                 'after' => $transaction->destination_locked_balance_after,
             ]
         ];
-    }
-
-    public function releaseLien(Request $request, Transaction $transaction): JsonResponse
-    {
-        try {
-            // Validate that the transaction is actually a lien
-            if ($transaction->transaction_type !== Transaction::TYPE_LIEN) {
-                return ResponseUtils::error('Transaction is not a lien transaction', 422);
-            }
-
-            // Validate webhook URL if provided
-            $request->validate(
-                [
-                'webhook_url' => 'nullable|url'
-                ]
-            );
-
-            // Use the new Transaction method to dispatch job
-            $webhookUrl = $request->webhook_url ?? config('sendman.notification_url');
-            $transaction->processLienRelease($webhookUrl);
-
-            return ResponseUtils::success(
-                [
-                'message' => 'Lien release job has been queued for processing',
-                'transaction_id' => $transaction->id,
-                'status' => 'queued'
-                ],
-                202
-            );
-        } catch (Exception $e) {
-            Log::error(
-                'Failed to queue lien release job: ' . $e->getMessage(),
-                [
-                'transaction_id' => $transaction->id,
-                'error' => $e->getMessage()
-                ]
-            );
-            return ResponseUtils::error('Failed to queue lien release: ' . $e->getMessage());
-        }
-    }
-
-    public function releaseAndWithdraw(LienReleaseAndWithdrawRequest $request, Transaction $transaction): JsonResponse
-    {
-        try {
-            $data = $request->validated();
-
-
-
-            $client = Client::where('external_id', $data['external_id'])->first();
-            if (!$client) {
-                return ResponseUtils::error('Client record not found', 404);
-            }
-
-            $account = Account::where('client_id', $client->id)
-                ->where('id', $transaction->source_account_id)
-                ->first();
-            if (!$account) {
-                return ResponseUtils::error('Account not found for this client', 404);
-            }
-
-            $data['processing_type'] = 'intra';
-            $data['processing_channel'] = 'api';
-            $data['external_reference'] = $data['transaction_reference'] ?? null;
-
-            $webhookUrl = $request->webhook_url ?? config('sendman.notification_url');
-            $transaction->processReleaseAndWithdraw($data, $webhookUrl);
-
-            return ResponseUtils::success(
-                [
-                'message' => 'Release and withdraw job has been queued for processing',
-                'transaction_id' => $transaction->id,
-                'status' => 'queued'
-                ],
-                202
-            );
-        } catch (\Exception $e) {
-            Log::error(
-                'Failed to queue release and withdraw job: ' . $e->getMessage(),
-                [
-                'transaction_id' => $transaction->id,
-                'error' => $e->getMessage()
-                ]
-            );
-            return ResponseUtils::error('Failed to queue release and withdraw: ' . $e->getMessage());
-        }
     }
 
     public function reverse(Transaction $transaction): JsonResponse
@@ -875,6 +706,127 @@ class TransactionController extends Controller
                 ]
             );
             return ResponseUtils::error('Failed to retrieve transaction log: ' . $e->getMessage());
+        }
+    }
+
+    private function getUserWalletAccount()
+    {
+        $user = auth()->user();
+
+        if (!$user) {
+            throw new Exception('User not authenticated');
+        }
+
+        $client = $user->client;
+
+        if (!$client) {
+            throw new ModelNotFoundException('Client profile not found for user');
+        }
+
+        $walletAccount = $client->accounts()
+            ->where('status', Account::STATUS_ACTIVE)
+            ->first();
+
+        if (!$walletAccount) {
+            throw new ModelNotFoundException('Active wallet account not found for client');
+        }
+
+        return $walletAccount;
+    }
+
+    public function balance(Request $request): JsonResponse
+    {
+        try {
+            $walletAccount = $this->getUserWalletAccount();
+
+            return ResponseUtils::success(
+                [
+                'account_id' => $walletAccount->id,
+                'account_number' => $walletAccount->account_number,
+                'currency' => $walletAccount->currency,
+                'available_balance' => $walletAccount->available_balance,
+                'actual_balance' => $walletAccount->actual_balance,
+                'locked_amount' => $walletAccount->locked_amount,
+                ]
+            );
+        } catch (ModelNotFoundException $e) {
+            return ResponseUtils::error($e->getMessage(), 404);
+        } catch (Exception $e) {
+            Log::error(
+                'Failed to retrieve wallet balance',
+                [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage()
+                ]
+            );
+            return ResponseUtils::error('Failed to retrieve wallet balance', 500);
+        }
+    }
+
+    public function transactions(Request $request): JsonResponse
+    {
+        try {
+            $request->validate(
+                [
+                'per_page' => 'nullable|integer|min:1|max:100',
+                'page' => 'nullable|integer|min:1',
+                ]
+            );
+
+            $walletAccount = $this->getUserWalletAccount();
+
+            $transactions = Transaction::where(
+                function ($q) use ($walletAccount) {
+                    $q->where('source_account_id', $walletAccount->id)
+                      ->orWhere('destination_account_id', $walletAccount->id);
+                }
+            )
+            ->with(
+                [
+                'sourceAccount:id,account_number,account_name,client_id',
+                'sourceAccount.client:id,external_id,email,phone',
+                'destinationAccount:id,account_number,account_name,client_id',
+                'destinationAccount.client:id,external_id,email,phone'
+                ]
+            )
+            ->orderBy('created_at', 'desc')
+            ->paginate($request->per_page ?? 15);
+
+            $transformedTransactions = $transactions->getCollection()->map(
+                function ($transaction) use ($walletAccount) {
+                    return $this->transformTransaction($transaction, $walletAccount->id);
+                }
+            );
+
+            return ResponseUtils::success(
+                [
+                'current_balance' => [
+                    'available' => $walletAccount->available_balance,
+                    'actual' => $walletAccount->actual_balance,
+                ],
+                'transactions' => $transformedTransactions,
+                'pagination' => [
+                    'current_page' => $transactions->currentPage(),
+                    'per_page' => $transactions->perPage(),
+                    'total' => $transactions->total(),
+                    'last_page' => $transactions->lastPage(),
+                    'has_more_pages' => $transactions->hasMorePages(),
+                ]
+                ]
+            );
+        } catch (ModelNotFoundException $e) {
+            return ResponseUtils::error($e->getMessage(), 404);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return ResponseUtils::error('Validation failed: ' . $e->getMessage(), 422);
+        } catch (Exception $e) {
+            Log::error(
+                'Failed to retrieve wallet transactions',
+                [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage()
+                ]
+            );
+            return ResponseUtils::error('Failed to retrieve wallet transactions', 500);
         }
     }
 }

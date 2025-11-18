@@ -16,7 +16,7 @@ class TransactionFactory extends Factory
         return [
             'id' => Str::uuid(),
             'account_id' => Account::factory(),
-            'transaction_type' => $this->faker->randomElement(['deposit', 'withdrawal']),
+            'transaction_type' => $this->faker->randomElement(['deposit', 'transfer', 'charge', 'reversal']),
             'amount' => $this->faker->randomFloat(2, 10, 1000),
             'currency' => 'USD',
             'status' => 'completed',

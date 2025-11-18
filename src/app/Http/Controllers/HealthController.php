@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
-use Ramp\Logger\Facades\RampLogger;
+use Ramp\Logger\Facades\Log;
 
 class HealthController extends Controller
 {
@@ -12,7 +12,7 @@ class HealthController extends Controller
      */
     public function health(): JsonResponse
     {
-        RampLogger::info('Health check requested', [
+        Log::info('Health check requested', [
             'service' => 'bankman',
             'endpoint' => '/health'
         ]);

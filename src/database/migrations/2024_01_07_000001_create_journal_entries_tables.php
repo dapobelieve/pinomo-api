@@ -12,7 +12,7 @@ return new class extends Migration
             $table->uuid('id')->primary();
             $table->string('entry_number')->unique();  // Auto-generated sequential number
             $table->date('entry_date');
-            $table->string('reference_type')->nullable();  // e.g., deposit, withdrawal, transfer
+            $table->string('reference_type')->nullable();  // e.g., deposit, transfer, charge, reversal
             $table->string('reference_id')->nullable();    // ID of the related transaction
             $table->string('currency', 3);
             $table->text('description')->nullable();

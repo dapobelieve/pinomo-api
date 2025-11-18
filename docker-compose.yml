@@ -1,6 +1,6 @@
 services:
-  bankman:
-    container_name: bankman
+  pimono:
+    container_name: pimono
     build:
       context: ./src
       dockerfile: Dockerfile

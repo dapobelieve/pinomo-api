@@ -13,7 +13,7 @@ return new class extends Migration
             $table->uuid('id')->primary();
             $table->string('name');
             $table->enum('charge_type', ['flat', 'percentage', 'tiered']);
-            $table->enum('txn_type', ['account_opening', 'deposit', 'withdrawal', 'vat', 'loan_interest', 'loan_disbursement', 'transfer']);
+            $table->enum('txn_type', ['account_opening', 'deposit', 'vat', 'loan_interest', 'loan_disbursement', 'transfer']);
             $table->decimal('amount', 19, 4)->nullable();
             $table->decimal('percentage', 8, 4)->nullable();
             $table->string('currency', 3); // ISO 4217 code

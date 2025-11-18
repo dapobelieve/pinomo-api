@@ -127,12 +127,6 @@ return [
             'path' => storage_path('logs/laravel.log'),
         ],
 
-        'ramp' => [
-            'driver' => 'custom',
-            'via' => \Ramp\Logger\Channels\RampLoggerChannel::class,
-            'level' => env('LOG_LEVEL', 'debug'),
-        ],
-
     ],
 
 ];

@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Ramp\Logger\Facades\RampLogger;
+use Ramp\Logger\Facades\Log;
 
 class Account extends Model
 {
@@ -128,7 +128,7 @@ class Account extends Model
         if ($this->actual_balance < 0) {
             return false; // Cannot disable overdraft while account is overdrawn
         }
-        
+
         $this->allow_overdraft = false;
         $this->overdraft_limit = 0;
         $this->overdraft_interest_rate = 0;
@@ -140,12 +140,12 @@ class Account extends Model
         return cache()->remember("account_{$this->id}_charges", now()->addMinutes(30), function () {
             // First check for account-specific charges
             $charges = Charge::getAccountSpecificCharges($this->id);
-            
+
             // If no account-specific charges, get global active charges
             if ($charges->isEmpty()) {
                 $charges = Charge::getActiveCharges();
             }
-            
+
             return $charges;
         });
     }
@@ -158,7 +158,7 @@ class Account extends Model
         }
 
         // Debug: Check what we're actually querying
-        RampLogger::info('Balance query debug', [
+        Log::info('Balance query debug', [
             'account_id' => $this->id,
             'date' => $date->toDateTimeString(),
         ]);
@@ -170,7 +170,7 @@ class Account extends Model
             ->first();
 
         if ($balanceHistory) {
-            RampLogger::info('Found balance history', [
+            Log::info('Found balance history', [
                 'balance' => $balanceHistory->actual_balance,
                 'date' => $balanceHistory->balance_date
             ]);
@@ -187,7 +187,7 @@ class Account extends Model
             ->first(['source_ledger_balance_after', 'created_at', 'internal_reference']);
 
         if ($lastTransaction) {
-            RampLogger::info('Found transaction via raw query', [
+            Log::info('Found transaction via raw query', [
                 'balance' => $lastTransaction->source_ledger_balance_after,
                 'transaction_date' => $lastTransaction->created_at,
                 'reference' => $lastTransaction->internal_reference
@@ -195,7 +195,7 @@ class Account extends Model
             return (float) $lastTransaction->source_ledger_balance_after;
         }
 
-        RampLogger::warning('No balance data found', [
+        Log::warning('No balance data found', [
             'account_id' => $this->id,
             'date' => $date->toDateTimeString()
         ]);

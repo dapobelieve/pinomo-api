@@ -13,16 +13,6 @@ Route::prefix('transactions')->name('transactions.')->group(function () {
     Route::get('/{transaction_id}', [TransactionController::class, 'show'])->name('show');
      Route::get('/{transaction_id}/status', [TransactionController::class, 'status'])->name('status');
 
-    // Withdrawals
-    Route::post('/withdrawals/{account_id}', [TransactionController::class, 'withdraw'])->name('withdraw');
-
-    // Liens
-    Route::post('/liens/{account_id}', [TransactionController::class, 'placeLien'])->name('liens.place');
-    Route::put('/liens/{transaction}', [TransactionController::class, 'releaseLien'])->name('liens.release');
-    Route::post('/liens/{transaction}/release-and-withdraw', [TransactionController::class, 'releaseAndWithdraw'])
-        ->name('liens.releaseAndWithdraw');
-
-
     // Account Statement
     Route::get('/accounts/{accountId}/statement', [TransactionController::class, 'statement'])->name('statement');
 

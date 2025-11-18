@@ -16,12 +16,9 @@ return new class extends Migration
             
             $table->enum('transaction_type', [
                 'deposit',
-                'withdrawal',
                 'transfer',
                 'charge',
-                'reversal',
-                'lien',
-                'lien_release'
+                'reversal'
             ]);
             
             $table->enum('processing_type', ['intra', 'inter']);

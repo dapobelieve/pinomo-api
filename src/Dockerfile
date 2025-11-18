@@ -69,15 +69,8 @@ RUN touch /var/www/html/storage/logs/laravel.log \
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-# Install Composer dependencies
-# Handle GitLab authentication for private repositories
-ARG GITLAB_TOKEN
-RUN if [ -n "$GITLAB_TOKEN" ]; then \
-        echo "{\"gitlab-token\": {\"gitlab.com\": \"$GITLAB_TOKEN\"}}" > auth.json; \
-    fi
 RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
 # Clean up auth file for security
-RUN rm -f auth.json
 
 RUN service apache2 stop
 

@@ -40,7 +40,6 @@ class ProcessJournalEntry implements ShouldQueue
 
             match($this->transaction->transaction_type) {
                 Transaction::TYPE_DEPOSIT => $this->processDeposit($entry),
-                Transaction::TYPE_WITHDRAWAL => $this->processWithdrawal($entry),
                 Transaction::TYPE_CHARGE => $this->processCharge($entry),
                 Transaction::TYPE_TRANSFER => $this->processTransfer($entry),
                 default => null
@@ -73,23 +72,6 @@ class ProcessJournalEntry implements ShouldQueue
             'debit_amount' => 0,
             'credit_amount' => $this->transaction->amount,
             'description' => 'Customer deposit'
-        ]);
-    }
-
-    protected function processWithdrawal(JournalEntry $entry)
-    {
-        $entry->items()->create([
-            'gl_account_id' => GLAccount::where('account_code', 'CUSTOMER_DEPOSITS')->first()->id,
-            'debit_amount' => $this->transaction->amount,
-            'credit_amount' => 0,
-            'description' => 'Customer withdrawal'
-        ]);
-
-        $entry->items()->create([
-            'gl_account_id' => $this->transaction->sourceAccount->gl_account_id,
-            'debit_amount' => 0,
-            'credit_amount' => $this->transaction->amount,
-            'description' => 'Withdrawal from ' . $this->transaction->sourceAccount->account_number
         ]);
     }
 

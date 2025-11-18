@@ -14,20 +14,8 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware) {
         $middleware->alias([
             'api.key' => \App\Http\Middleware\ApiKeyAuthMiddleware::class,
-            'ramp.request-response' => \Ramp\Logger\Middleware\RequestResponseLoggerMiddleware::class,
-            'ramp.apm' => \Ramp\Logger\Middleware\APMMiddleware::class,
         ]);
-        
-        // Add request logging and APM middleware to web and api groups
-        $middleware->web(append: [
-            \Ramp\Logger\Middleware\APMMiddleware::class,
-            \Ramp\Logger\Middleware\RequestResponseLoggerMiddleware::class,
-        ]);
-        
-        $middleware->api(append: [
-            \Ramp\Logger\Middleware\APMMiddleware::class,
-            \Ramp\Logger\Middleware\RequestResponseLoggerMiddleware::class,
-        ]);
+
     })
     ->withExceptions(function (Exceptions $exceptions) {
         //

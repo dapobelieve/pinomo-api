@@ -33,13 +33,10 @@ class AuthController extends Controller
 
         $token = $user->createToken('auth_token')->plainTextToken;
 
-        // Send email verification notification
-        $user->sendEmailVerificationNotification();
-
         return ResponseUtils::success([
             'user' => $user,
             'token' => $token,
-        ], 'User registered successfully. Please check your email for verification link.');
+        ], 'User registered successfully');
     }
 
     public function login(Request $request)

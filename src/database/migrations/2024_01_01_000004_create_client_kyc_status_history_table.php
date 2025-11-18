@@ -13,7 +13,7 @@ return new class extends Migration
             $table->char('client_id', 36);
             $table->enum('old_status', ['pending', 'verified', 'rejected']);
             $table->enum('new_status', ['pending', 'verified', 'rejected']);
-            $table->unsignedBigInteger('action_by_user_id');
+            $table->char('action_by_user_id', 36);
             $table->text('notes')->nullable();
             $table->timestamp('changed_at');
             $table->timestamps();

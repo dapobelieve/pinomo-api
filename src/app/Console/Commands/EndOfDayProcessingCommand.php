@@ -83,7 +83,7 @@ class EndOfDayProcessingCommand extends Command
                 'account_id' => $accountId,
                 'date' => $today,
                 'total_credits' => $accountTransactions->where('transaction_type', Transaction::TYPE_DEPOSIT)->sum('amount'),
-                'total_debits' => $accountTransactions->where('transaction_type', Transaction::TYPE_WITHDRAWAL)->sum('amount'),
+                'total_debits' => $accountTransactions->whereIn('transaction_type', [Transaction::TYPE_CHARGE])->sum('amount'),
                 'transaction_count' => $accountTransactions->count()
             ]);
         }

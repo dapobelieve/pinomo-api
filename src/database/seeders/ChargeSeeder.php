@@ -24,7 +24,7 @@ class ChargeSeeder extends Seeder
 
     private function createTransferCommissionCharge(GLAccount $glAccount): void
     {
-        $existingCharge = Charge::where('charge_name', 'Transfer Commission - AED')
+        $existingCharge = Charge::where('name', 'Transfer Commission - AED')
             ->where('currency', 'AED')
             ->first();
 
@@ -35,10 +35,10 @@ class ChargeSeeder extends Seeder
         }
 
         $charge = Charge::create([
-            'charge_name' => 'Transfer Commission - AED',
+            'name' => 'Transfer Commission - AED',
             'charge_type' => 'percentage',
             'percentage' => 1.5000,
-            'fixed_amount' => null,
+            'amount' => null,
             'currency' => 'AED',
             'description' => '1.5% commission applied to all wallet transfer transactions in AED.',
             'is_active' => true,

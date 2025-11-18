@@ -5,8 +5,6 @@ namespace App\Models;
 use App\Exceptions\InsufficientFundsException;
 use App\Jobs\ProcessChargeAccounting;
 use App\Jobs\ProcessTransactionAggregate;
-use App\Jobs\ReleaseAndWithdrawJob;
-use App\Jobs\ReleaseLienJob;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -45,6 +43,12 @@ class Transaction extends Model
         'source_ledger_balance_after',
         'source_locked_balance_after',
         'source_available_balance_after',
+        'destination_ledger_balance_before',
+        'destination_locked_balance_before',
+        'destination_available_balance_before',
+        'destination_ledger_balance_after',
+        'destination_locked_balance_after',
+        'destination_available_balance_after',
         'status',
         'description',
         'metadata',
@@ -62,18 +66,21 @@ class Transaction extends Model
         'source_ledger_balance_after' => 'decimal:4',
         'source_locked_balance_after' => 'decimal:4',
         'source_available_balance_after' => 'decimal:4',
+        'destination_ledger_balance_before' => 'decimal:4',
+        'destination_locked_balance_before' => 'decimal:4',
+        'destination_available_balance_before' => 'decimal:4',
+        'destination_ledger_balance_after' => 'decimal:4',
+        'destination_locked_balance_after' => 'decimal:4',
+        'destination_available_balance_after' => 'decimal:4',
         'metadata' => 'json',
         'approved_at' => 'datetime'
     ];
 
     // Transaction Types
     public const TYPE_DEPOSIT = 'deposit';
-    public const TYPE_WITHDRAWAL = 'withdrawal';
     public const TYPE_TRANSFER = 'transfer';
     public const TYPE_CHARGE = 'charge';
     public const TYPE_REVERSAL = 'reversal';
-    public const TYPE_LIEN = 'lien';
-    public const TYPE_LIEN_RELEASE = 'lien_release';
 
     // Processing Types
     public const PROCESSING_INTERNAL = 'intra';
@@ -126,36 +133,6 @@ class Transaction extends Model
             && !$this->reversalTransaction()->exists();
     }
 
-    public function isLien(): bool
-    {
-        return $this->transaction_type === self::TYPE_LIEN;
-    }
-
-    public function canReleaseLien(): bool
-    {
-        return $this->isLien()
-            && $this->status === self::STATUS_COMPLETED
-            && !$this->reversalTransaction()->exists();
-    }
-
-    public function processLienRelease(?string $webhookUrl = null): void
-    {
-        if (!$this->canReleaseLien()) {
-            throw new \Exception('Lien cannot be released');
-        }
-
-        ReleaseLienJob::dispatch($this, $webhookUrl);
-    }
-
-    public function processReleaseAndWithdraw(array $withdrawalData, ?string $webhookUrl = null): void
-    {
-        if (!$this->canReleaseLien()) {
-            throw new \Exception('Lien & withdraw operation cannot be performed');
-        }
-
-        ReleaseAndWithdrawJob::dispatch($this, $withdrawalData, $webhookUrl);
-    }
-
     public function needsCompliance(): bool
     {
         return $this->status === self::STATUS_AWAITING_COMPLIANCE;
@@ -189,151 +166,167 @@ class Transaction extends Model
         return $transaction;
     }
 
-    public static function createWithdrawal(Account $account, array $data): self
+    public static function createTransfer(Account $sourceAccount, Account $destinationAccount, array $data): self
     {
-        $withdrawalAmount = $data['amount'];
-        $availableBalance = $account->available_balance;
-        $actualBalance = $account->actual_balance; // FIXED: was ledger_balance
+        self::validateTransferAccounts($sourceAccount, $destinationAccount);
 
-        if ($account->product->minimum_withdrawal_amount && $withdrawalAmount < $account->product->minimum_withdrawal_amount) {
-            throw new \InvalidArgumentException(
-                "Withdrawal amount {$withdrawalAmount} is below minimum withdrawal limit {$account->product->minimum_withdrawal_amount}"
-            );
+        $transferAmount = $data['amount'];
+
+        self::validateSufficientBalance($sourceAccount, $transferAmount);
+
+        $commissionAmount = self::calculateTransferCommission($sourceAccount, $transferAmount);
+        $transaction = self::buildTransferTransaction($sourceAccount, $destinationAccount, $data, $transferAmount, $commissionAmount);
+
+        $transaction->processTransferAndSave($sourceAccount, $destinationAccount);
+
+        return $transaction;
+    }
+
+    private static function validateTransferAccounts(Account $sourceAccount, Account $destinationAccount): void
+    {
+        if ($sourceAccount->id === $destinationAccount->id) {
+            throw new InvalidArgumentException('Cannot transfer to the same account');
         }
 
-        if ($account->single_transaction_limit && $withdrawalAmount > $account->single_transaction_limit) {
-            throw new \InvalidArgumentException(
-                "Withdrawal amount {$withdrawalAmount} exceeds single transaction limit {$account->single_transaction_limit}"
-            );
+        if ($sourceAccount->currency !== $destinationAccount->currency) {
+            throw new InvalidArgumentException('Cross-currency transfers are not supported');
         }
 
-        $today = now()->format('Y-m-d');
-        $dailyAggregate = TransactionAggregate::where('account_id', $account->id)
-            ->where('date', $today)
-            ->first();
+        if ($sourceAccount->status !== Account::STATUS_ACTIVE) {
+            throw new InvalidArgumentException('Source account is not active');
+        }
 
-        $dailyLimit = $account->product->daily_transaction_limit ?? PHP_FLOAT_MAX;
-        if ($dailyAggregate) {
-            $newDailyTotal = bcadd($dailyAggregate->aggregated_daily_amount, $withdrawalAmount, 4);
-            if ($newDailyTotal > $dailyLimit) {
-                throw new \InvalidArgumentException(
-                    "This withdrawal would exceed your daily transaction limit of {$dailyLimit}. Current daily total: {$dailyAggregate->aggregated_daily_amount}"
-                );
+        if ($destinationAccount->status !== Account::STATUS_ACTIVE) {
+            throw new InvalidArgumentException('Destination account is not active');
+        }
+    }
+
+    private static function calculateTransferCommission(Account $account, float $amount): float
+    {
+        $charges = $account->getCharges();
+        $totalCommission = 0;
+
+        foreach ($charges as $charge) {
+            if ($charge->transaction_type === self::TYPE_TRANSFER) {
+                $totalCommission += $charge->calculateCharge($amount);
             }
         }
 
-        // Calculate applicable charges
-        $accountCharges = $account->getCharges();
-        $totalChargeAmount = 0;
-        $chargeBreakdown = [];
+        return $totalCommission;
+    }
 
-        foreach ($accountCharges as $charge) {
-            $chargeAmount = $charge->calculateCharge($withdrawalAmount);
-            if ($chargeAmount > 0) {
-                $totalChargeAmount += $chargeAmount;
-                $chargeBreakdown[] = [
-                    'charge_name' => $charge->charge_name,
-                    'charge_amount' => $chargeAmount,
-                    'charge_type' => $charge->charge_type
-                ];
-            }
-        }
-
-        $totalAmount = $withdrawalAmount + $totalChargeAmount;
-
-        if ($availableBalance < $totalAmount) {
-            if (!$account->hasOverdraftFacility()) {
-                throw new InsufficientFundsException(
-                    $account,
-                    $totalAmount,
-                    "Insufficient available balance. Required: {$totalAmount}, Available: {$availableBalance}"
-                );
-            }
-
-            $availableOverdraft = $account->getAvailableOverdraft();
-            $overdraftRequired = $totalAmount - $availableBalance;
-
-            if ($overdraftRequired > $availableOverdraft) {
-                throw new InsufficientFundsException(
-                    $account,
-                    $totalAmount,
-                    "Total amount (withdrawal + charges) exceeds available balance and overdraft limit. Required overdraft: {$overdraftRequired}, Available overdraft: {$availableOverdraft}"
-                );
-            }
-        }
-
-        if ($actualBalance < $totalAmount && !$account->hasOverdraftFacility()) {
+    private static function validateSufficientBalance(Account $account, float $requiredAmount): void
+    {
+        if ($account->available_balance < $requiredAmount) {
             throw new InsufficientFundsException(
                 $account,
-                $totalAmount,
-                "Insufficient actual balance for withdrawal"
+                $requiredAmount,
+                "Insufficient balance for transfer. Required: {$requiredAmount}, Available: {$account->available_balance}"
             );
         }
+    }
 
-        $preTransactionActualBalance = $account->actual_balance; // FIXED: was ledger_balance
-        $preTransactionAvailableBalance = $account->available_balance;
-        $preTransactionLockedAmount = $account->locked_amount; // FIXED: was locked_balance
-
-        // Create the withdrawal transaction
-        $transaction = new self(
-            [
-            'transaction_type' => self::TYPE_WITHDRAWAL,
-            'processing_type' => $data['processing_type'],
-            'processing_channel' => $data['processing_channel'],
-            'source_account_id' => $account->id,
+    private static function buildTransferTransaction(Account $sourceAccount, Account $destinationAccount, array $data, float $amount, float $commission): self
+    {
+        return new self([
+            'transaction_type' => self::TYPE_TRANSFER,
+            'processing_type' => $data['processing_type'] ?? self::PROCESSING_INTERNAL,
+            'processing_channel' => $data['processing_channel'] ?? 'api',
+            'source_account_id' => $sourceAccount->id,
+            'destination_account_id' => $destinationAccount->id,
             'external_reference' => $data['transaction_reference'],
-            'currency' => $account->currency,
-            'amount' => $withdrawalAmount,
-            'description' => $data['description'],
-            'source_ledger_balance_before' => $preTransactionActualBalance, // Maps actual_balance to ledger_balance field
-            'source_available_balance_before' => $preTransactionAvailableBalance,
-            'source_locked_balance_before' => $preTransactionLockedAmount, // Maps locked_amount to locked_balance field
+            'currency' => $sourceAccount->currency,
+            'amount' => $amount,
+            'description' => $data['description'] ?? 'Wallet transfer',
             'metadata' => array_merge(
                 $data['metadata'] ?? [],
                 [
-                'is_overdraft' => $availableBalance < $totalAmount,
-                'overdraft_amount' => $availableBalance < $totalAmount ? ($totalAmount - $availableBalance) : 0,
-                'total_charges' => $totalChargeAmount,
-                'charge_breakdown' => $chargeBreakdown,
-                'withdrawal_channel' => $data['processing_channel']
+                    'commission_amount' => $commission,
+                    'total_debit' => $amount,
+                    'transfer_channel' => $data['processing_channel'] ?? 'api'
                 ]
             ),
             'status' => self::STATUS_PENDING,
             'created_by_user_id' => auth()->id() ?? 1
-            ]
-        );
-
-        $transaction->processAndSave($account);
-
-        return $transaction;
+        ]);
     }
 
-
-    public static function createLien(Account $account, array $data): self
+    protected function processTransferAndSave(Account $sourceAccount, Account $destinationAccount)
     {
-        if ($account->available_balance < $data['amount']) {
-            throw new \Exception('Insufficient available balance to place account on lien');
+        try {
+            DB::beginTransaction();
+
+            $this->setSourceBalanceSnapshots($sourceAccount);
+            $this->setDestinationBalanceSnapshots($destinationAccount);
+
+            $this->updateTransferBalances($sourceAccount, $destinationAccount);
+
+            $this->setSourceBalanceSnapshotsAfter($sourceAccount);
+            $this->setDestinationBalanceSnapshotsAfter($destinationAccount);
+
+            $this->generateInternalReference();
+            $this->status = self::STATUS_PROCESSING;
+            $this->save();
+
+            if (!$sourceAccount->save() || !$destinationAccount->save()) {
+                throw new \RuntimeException('Concurrent modification detected');
+            }
+
+            $this->processJournalEntriesAsync();
+            $this->processChargesAsync();
+            $this->publishStatusUpdate();
+
+            ProcessTransactionAggregate::dispatch(
+                $this->source_account_id,
+                $this->amount,
+                $this->transaction_type
+            );
+
+            DB::commit();
+            return true;
+        } catch (\Exception $e) {
+            DB::rollBack();
+            throw $e;
         }
-
-        $transaction = new self(
-            [
-            'transaction_type' => self::TYPE_LIEN,
-            'processing_type' => $data['processing_type'],
-            'processing_channel' => $data['processing_channel'],
-            'source_account_id' => $account->id,
-            'external_reference' => $data['transaction_reference'],
-            'currency' => $account->currency,
-            'status' => self::STATUS_PENDING,
-            'amount' => $data['amount'],
-            'description' => $data['description'],
-            'metadata' => $data['metadata'] ?? null,
-            'created_by_user_id' => 1,
-            ]
-        );
-
-         $transaction->processAndSave($account);
-        return $transaction;
     }
+
+    private function setSourceBalanceSnapshots(Account $account): void
+    {
+        $this->source_ledger_balance_before = $account->actual_balance;
+        $this->source_locked_balance_before = $account->locked_amount;
+        $this->source_available_balance_before = $account->available_balance;
+    }
+
+    private function setDestinationBalanceSnapshots(Account $account): void
+    {
+        $this->destination_ledger_balance_before = $account->actual_balance;
+        $this->destination_locked_balance_before = $account->locked_amount;
+        $this->destination_available_balance_before = $account->available_balance;
+    }
+
+    private function setSourceBalanceSnapshotsAfter(Account $account): void
+    {
+        $this->source_ledger_balance_after = $account->actual_balance;
+        $this->source_locked_balance_after = $account->locked_amount;
+        $this->source_available_balance_after = $account->available_balance;
+    }
+
+    private function setDestinationBalanceSnapshotsAfter(Account $account): void
+    {
+        $this->destination_ledger_balance_after = $account->actual_balance;
+        $this->destination_locked_balance_after = $account->locked_amount;
+        $this->destination_available_balance_after = $account->available_balance;
+    }
+
+    private function updateTransferBalances(Account $sourceAccount, Account $destinationAccount): void
+    {
+        $sourceAccount->actual_balance -= $this->amount;
+        $sourceAccount->available_balance -= $this->amount;
+
+        $destinationAccount->actual_balance += $this->amount;
+        $destinationAccount->available_balance += $this->amount;
+    }
+
 
     public function createReversal(): self
     {
@@ -357,152 +350,6 @@ class Transaction extends Model
 
         return $reversal->processAndSave($this->sourceAccount);
     }
-
-    public function createLienRelease($data): self
-    {
-        if (!$this->canReleaseLien()) {
-            throw new \Exception('Lien cannot be released');
-        }
-
-        $release = new self(
-            [
-            'transaction_type' => self::TYPE_LIEN_RELEASE,
-            'processing_type' => self::PROCESSING_INTERNAL,
-            'source_account_id' => $this->source_account_id,
-            'external_reference' => $data['transaction_reference'],
-            'processing_channel' => 'system',
-            'currency' => $this->currency,
-            'amount' => $this->amount,
-            'description' => 'Release lien for transaction ' . $this->internal_reference,
-            'original_transaction_id' => $this->id,
-            'created_by_user_id' => 1
-            ]
-        );
-
-        $release->processAndSave($this->sourceAccount);
-
-        return $release;
-    }
-
-    public function createReleaseAndWithdraw(Account $account, array $data): array
-    {
-        if (!$this->canReleaseLien()) {
-            throw new \Exception('Lien cannot be released');
-        }
-
-        try {
-            // Create both transactions first
-            $withdrawal = new self(
-                [
-                'transaction_type' => self::TYPE_WITHDRAWAL,
-                'processing_type' => $data['processing_type'],
-                'processing_channel' => $data['processing_channel'],
-                'source_account_id' => $this->source_account_id,
-                'external_reference' => $data['external_reference'],
-                'currency' => $this->currency,
-                'amount' => $this->amount,
-                'description' => $data['description'] ?? 'Withdrawal',
-                'metadata' => array_merge(
-                    $data['metadata'] ?? [],
-                    [
-                    'lien_transaction_id' => $this->id,
-                    'operation_type' => 'release_and_withdraw'
-                    ]
-                ),
-                'status' => self::STATUS_PENDING,
-                'created_by_user_id' => auth()->id() ?? 1
-                ]
-            );
-
-            $release = new self(
-                [
-                'transaction_type' => self::TYPE_LIEN_RELEASE,
-                'processing_type' => self::PROCESSING_INTERNAL,
-                'processing_channel' => 'system',
-                'source_account_id' => $this->source_account_id,
-                'external_reference' => $data['external_reference'],
-                'currency' => $this->currency,
-                'amount' => $this->amount,
-                'description' => 'Release lien for transaction ' . $this->internal_reference,
-                'original_transaction_id' => $this->id,
-                'metadata' => [
-                    'operation_type' => 'release_and_withdraw'
-                ],
-                'status' => self::STATUS_PENDING,
-                'created_by_user_id' => auth()->id() ?? 1
-                ]
-            );
-
-            // Process both operations atomically
-            $withdrawal->processAndSave($account);
-
-            // Reload account to get updated balances
-            //            $account->refresh();
-
-            // Process release with updated account
-            $release->processAndSave($account);
-
-            return [
-                'withdrawal' => $withdrawal,
-                'release' => $release
-            ];
-        } catch (\Exception $e) {
-            throw $e;
-        }
-    }
-
-    private function processReleaseAndWithdrawAtomic(Account $account, Transaction $withdrawal, Transaction $release): void
-    {
-        // Capture initial state
-        $initialBalance = $account->actual_balance;
-        $initialLocked = $account->locked_amount;
-        $initialAvailable = $account->available_balance;
-
-        // Step 1: Process withdrawal only
-        $account->actual_balance -= $this->amount;
-        $account->available_balance -= $this->amount;
-
-        // Capture intermediate state for withdrawal
-        $withdrawalFinalBalance = $account->actual_balance;
-        $withdrawalFinalAvailable = $account->available_balance;
-        $withdrawalFinalLocked = $account->locked_amount;
-
-        // Step 2: Process release
-        $account->locked_amount -= $this->amount;
-        $account->available_balance += $this->amount;
-
-        // Set withdrawal snapshots
-        $withdrawal->source_ledger_balance_before = $initialBalance;
-        $withdrawal->source_locked_balance_before = $initialLocked;
-        $withdrawal->source_available_balance_before = $initialAvailable;
-        $withdrawal->source_ledger_balance_after = $withdrawalFinalBalance;
-        $withdrawal->source_locked_balance_after = $withdrawalFinalLocked;
-        $withdrawal->source_available_balance_after = $withdrawalFinalAvailable;
-
-        // Set release snapshots
-        $release->source_ledger_balance_before = $withdrawalFinalBalance;
-        $release->source_locked_balance_before = $withdrawalFinalLocked;
-        $release->source_available_balance_before = $withdrawalFinalAvailable;
-        $release->source_ledger_balance_after = $account->actual_balance;
-        $release->source_locked_balance_after = $account->locked_amount;
-        $release->source_available_balance_after = $account->available_balance;
-
-        // Save everything
-        $withdrawal->generateInternalReference();
-        $withdrawal->status = self::STATUS_PROCESSING;
-        $release->generateInternalReference();
-        $release->status = self::STATUS_PROCESSING;
-
-        $withdrawal->save();
-        $release->save();
-        $account->save();
-
-        $withdrawal->processJournalEntriesAsync();
-        $release->processJournalEntriesAsync();
-    }
-
-    //    for every txn after in previous txn become the before in the subsequent txn
-    // after of subsequent txn = before + amount
 
     // Process and save transaction
     public function processAndSave(Account $account)
@@ -536,7 +383,7 @@ class Transaction extends Model
             $this->processJournalEntriesAsync();
 
             // Apply charges asynchronously if applicable
-            if (in_array($this->transaction_type, [self::TYPE_DEPOSIT, self::TYPE_WITHDRAWAL])) {
+            if (in_array($this->transaction_type, [self::TYPE_DEPOSIT, self::TYPE_TRANSFER])) {
                 $this->processChargesAsync();
             }
 
@@ -561,15 +408,6 @@ class Transaction extends Model
     protected function updateBalances(Account $account)
     {
         switch ($this->transaction_type) {
-            case self::TYPE_WITHDRAWAL:
-                $potentialBalance = $account->actual_balance - $this->amount;
-                if ($potentialBalance < 0 && !$account->hasOverdraftFacility()) {
-                    throw new InsufficientFundsException($account, $this->amount);
-                }
-                $account->actual_balance -= $this->amount;
-                $account->available_balance -= $this->amount;
-                break;
-
             case self::TYPE_CHARGE:
                 $potentialBal = $account->actual_balance - $this->amount;
                 if ($potentialBal < 0 && !$account->hasOverdraftFacility()) {
@@ -581,21 +419,6 @@ class Transaction extends Model
 
             case self::TYPE_DEPOSIT:
                 $account->actual_balance += $this->amount;
-                $account->available_balance += $this->amount;
-                break;
-
-            case self::TYPE_LIEN:
-                $account->locked_amount += $this->amount;
-                $account->available_balance -= $this->amount;
-                break;
-
-            case self::TYPE_LIEN_RELEASE:
-                if ($account->locked_amount < $this->amount) {
-                    throw new \InvalidArgumentException(
-                        "Insufficient locked amount. Required: {$this->amount}, Available: {$account->locked_amount}"
-                    );
-                }
-                $account->locked_amount -= $this->amount;
                 $account->available_balance += $this->amount;
                 break;
 
@@ -691,12 +514,9 @@ class Transaction extends Model
     {
         return match ($this->transaction_type) {
             self::TYPE_DEPOSIT => "Deposit to account {$this->sourceAccount->account_number} - {$this->description}",
-            self::TYPE_WITHDRAWAL => "Withdrawal from account {$this->sourceAccount->account_number} - {$this->description}",
             self::TYPE_TRANSFER => "Transfer from {$this->sourceAccount->account_number} to {$this->destinationAccount->account_number}",
             self::TYPE_CHARGE => "Charge on account {$this->sourceAccount->account_number} - {$this->description}",
             self::TYPE_REVERSAL => "Reversal of transaction {$this->originalTransaction->internal_reference}",
-            self::TYPE_LIEN => "Lien placed on account {$this->sourceAccount->account_number}",
-            self::TYPE_LIEN_RELEASE => "Lien released on account {$this->sourceAccount->account_number}",
             default => $this->description ?? 'Transaction'
         };
     }
@@ -707,22 +527,9 @@ class Transaction extends Model
             case self::TYPE_DEPOSIT:
                 $this->createDepositJournalItems($journalEntry);
                 break;
-            case self::TYPE_WITHDRAWAL:
-                $this->createWithdrawalJournalItems($journalEntry);
+            case self::TYPE_TRANSFER:
+                $this->createTransferJournalItems($journalEntry);
                 break;
-        //            case self::TYPE_TRANSFER:
-        //                $this->createTransferJournalItems($journalEntry);
-        //                break;
-        //            case self::TYPE_CHARGE:
-        //                $this->createChargeJournalItems($journalEntry);
-        //                break;
-        //            case self::TYPE_REVERSAL:
-        //                $this->createReversalJournalItems($journalEntry);
-        //                break;
-        //            case self::TYPE_LIEN:
-        //            case self::TYPE_LIEN_RELEASE:
-        //                // Liens don't create GL entries, only memo entries
-        //                break;
         }
     }
 
@@ -806,27 +613,24 @@ class Transaction extends Model
         return $glAccount->id;
     }
 
-    protected function createWithdrawalJournalItems(JournalEntry $journalEntry): void
+    protected function createTransferJournalItems(JournalEntry $journalEntry): void
     {
-        // Debit: Cash Account (Asset - cash going out to customer)
-        $journalEntry->items()->create(
-            [
-            'gl_account_id' => $this->getCashAccountGLId(),
+        $sourceAccountNumber = $this->sourceAccount->account_number;
+        $destinationAccountNumber = $this->destinationAccount->account_number;
+
+        $journalEntry->items()->create([
+            'gl_account_id' => $this->getCustomerAccountGLId(),
             'debit_amount' => $this->amount,
             'credit_amount' => 0,
-            'description' => "Cash paid for withdrawal from {$this->sourceAccount->account_number}"
-            ]
-        );
+            'description' => "Transfer from account {$sourceAccountNumber}"
+        ]);
 
-        // Credit: Customer Deposits (Liability - reduces what bank owes customer)
-        $journalEntry->items()->create(
-            [
+        $journalEntry->items()->create([
             'gl_account_id' => $this->getCustomerAccountGLId(),
             'debit_amount' => 0,
             'credit_amount' => $this->amount,
-            'description' => "Withdrawal from customer account"
-            ]
-        );
+            'description' => "Transfer to account {$destinationAccountNumber}"
+        ]);
     }
 
     //    protected function createReversalJournalItems(JournalEntry $journalEntry): void
@@ -871,7 +675,6 @@ class Transaction extends Model
     {
         return match ($this->transaction_type) {
             self::TYPE_DEPOSIT => 'deposit',
-            self::TYPE_WITHDRAWAL => 'withdrawal',
             self::TYPE_TRANSFER => 'transfer',
             default => null
         };
