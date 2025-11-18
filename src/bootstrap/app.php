@@ -15,8 +15,11 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'api.key' => \App\Http\Middleware\ApiKeyAuthMiddleware::class,
         ]);
-
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        //
+        $exceptions->render(function (\Illuminate\Auth\AuthenticationException $e, $request) {
+            return response()->json([
+                'message' => 'Unauthenticated.'
+            ], 401);
+        });
     })->create();

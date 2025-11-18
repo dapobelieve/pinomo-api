@@ -153,6 +153,79 @@ class TransactionController extends Controller
             );
     }
 
+    public function walletDeposit(Request $request): JsonResponse
+    {
+        $request->validate([
+            'amount' => 'required|numeric|min:0.01',
+            'currency' => 'required|string|size:3',
+            'description' => 'nullable|string|max:255',
+            'transaction_reference' => 'required|string|max:255|unique:transactions,external_reference',
+        ]);
+
+        try {
+            DB::beginTransaction();
+
+            $user = auth()->user();
+
+            if (!$user) {
+                return ResponseUtils::error('User not authenticated', 401);
+            }
+
+            $client = Client::where('external_id', $user->id)->first();
+
+            if (!$client) {
+                return ResponseUtils::error('Client profile not found for user', 404);
+            }
+
+            $account = Account::lockForUpdate()
+                ->where('client_id', $client->id)
+                ->where('status', Account::STATUS_ACTIVE)
+                ->first();
+
+            if (!$account) {
+                return ResponseUtils::error('Active wallet account not found', 404);
+            }
+
+            $data = [
+                'amount' => $request->amount,
+                'currency' => $request->currency,
+                'description' => $request->description,
+                'processing_type' => 'intra',
+                'processing_channel' => 'api',
+                'external_reference' => $request->transaction_reference,
+                'transaction_reference' => $request->transaction_reference,
+            ];
+
+            $transaction = Transaction::createDeposit($account, $data);
+
+            DB::commit();
+
+            return ResponseUtils::success(
+                [
+                    'transaction_id' => $transaction->id,
+                    'account_id' => $account->id,
+                    'amount' => $transaction->amount,
+                    'currency' => $transaction->currency,
+                    'status' => $transaction->status,
+                    'new_balance' => $account->fresh()->available_balance,
+                ],
+                'Deposit processed successfully',
+                201
+            );
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error(
+                'Wallet deposit failed: ' . $e->getMessage(),
+                [
+                    'user_id' => auth()->id(),
+                    'amount' => $request->amount ?? null,
+                    'error' => $e->getMessage()
+                ]
+            );
+            return ResponseUtils::error('Failed to process deposit: ' . $e->getMessage(), 500);
+        }
+    }
+
     public function deposit(DepositTransactionRequest $request, string $account_id): JsonResponse
     {
         $data = $request->validated();
@@ -732,6 +805,36 @@ class TransactionController extends Controller
         }
 
         return $walletAccount;
+    }
+
+    public function wallets(Request $request): JsonResponse
+    {
+        try {
+            $user = auth()->user();
+
+            if (!$user) {
+                return ResponseUtils::error('User not authenticated', 401);
+            }
+
+            $client = Client::where('external_id', $user->id)->first();
+
+            if (!$client) {
+                return ResponseUtils::error('Client profile not found for user', 404);
+            }
+
+            $accounts = $client->accounts()->get();
+
+            return ResponseUtils::success($accounts);
+        } catch (Exception $e) {
+            Log::error(
+                'Failed to retrieve wallets',
+                [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage()
+                ]
+            );
+            return ResponseUtils::error('Failed to retrieve wallets', 500);
+        }
     }
 
     public function balance(Request $request): JsonResponse
